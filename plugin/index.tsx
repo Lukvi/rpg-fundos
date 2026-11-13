@@ -49,7 +49,7 @@ const settings = definePluginSettings({
     cssExtra: { type: OptionType.STRING, description: "CSS extra (avançado, para ajustes finos)", default: "" },
     local: { type: OptionType.STRING, description: "", default: "{}", hidden: true },
     jogador: { type: OptionType.STRING, description: "", default: "{}", hidden: true },
-    painel: { type: OptionType.COMPONENT, component: () => <Painel /> }
+    painel: { type: OptionType.COMPONENT, component: () => <PainelSeguro /> }
 });
 
 // ---------- utilidades ----------
@@ -597,12 +597,14 @@ function PainelJogador() {
 }
 
 function BannerAtualizacao() {
-    const [estado, setEstado] = React.useState<"verificando" | "atual" | "disponivel" | "atualizando" | "pronto" | "erro">("verificando");
+    const [estado, setEstado] = React.useState<"verificando" | "atual" | "antigo" | "disponivel" | "atualizando" | "pronto" | "erro">("verificando");
     const [msg, setMsg] = React.useState("");
     const args = () => ({ repo: settings.store.repo, branch: settings.store.branch });
 
     React.useEffect(() => {
-        Native.verificarAtualizacao(args())
+        if (typeof (Native as any)?.verificarAtualizacao !== "function") { setEstado("antigo"); return; }
+        Promise.resolve()
+            .then(() => Native.verificarAtualizacao(args()))
             .then(r => setEstado(r.disponivel ? "disponivel" : "atual"))
             .catch(() => setEstado("atual"));
     }, []);
@@ -619,6 +621,8 @@ function BannerAtualizacao() {
     }
 
     const caixa: React.CSSProperties = { padding: 12, borderRadius: 6, margin: "8px 0", background: "rgba(88,101,242,.15)" };
+    if (estado === "antigo")
+        return <div style={caixa}>O atualizador ainda não está ativo neste computador. Feche o Discord por completo (inclusive pelo ícone perto do relógio) e abra de novo.</div>;
     if (estado === "disponivel")
         return <div style={caixa}>Há uma atualização do plugin. <button style={{ ...estiloBtn, marginLeft: 8 }} onClick={atualizarAgora}>Atualizar agora</button></div>;
     if (estado === "atualizando")
@@ -628,6 +632,33 @@ function BannerAtualizacao() {
     if (estado === "erro")
         return <div style={{ ...caixa, background: "rgba(218,55,60,.2)" }}>Não consegui atualizar: {msg}<br />Seus arquivos antigos foram mantidos. Se persistir, rode o Instalar-RPG.bat.</div>;
     return null;
+}
+
+let Protegido: any;
+function obterProtegido() {
+    if (!Protegido) {
+        Protegido = class extends (React as any).Component {
+            state: { erro?: string; } = {};
+            static getDerivedStateFromError(e: any) {
+                return { erro: String(e?.stack ?? e?.message ?? e).slice(0, 700) };
+            }
+            render() {
+                if (this.state.erro)
+                    return (
+                        <div style={{ padding: 12, borderRadius: 6, background: "rgba(218,55,60,.2)", whiteSpace: "pre-wrap", fontSize: 12 }}>
+                            O painel encontrou um erro, mas o Discord continua funcionando. Envie esta mensagem para quem fez o plugin:{"\n\n"}{this.state.erro}
+                        </div>
+                    );
+                return (this as any).props.children;
+            }
+        };
+    }
+    return Protegido;
+}
+
+function PainelSeguro() {
+    const P = obterProtegido();
+    return <P><Painel /></P>;
 }
 
 function Painel() {
@@ -662,7 +693,7 @@ function abrirPainel() {
                 <ModalCloseButton onClick={props.onClose} />
             </ModalHeader>
             <ModalContent>
-                <div style={{ padding: 16 }}><Painel /></div>
+                <div style={{ padding: 16 }}><PainelSeguro /></div>
             </ModalContent>
         </ModalRoot>
     ));
