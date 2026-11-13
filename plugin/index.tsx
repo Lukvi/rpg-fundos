@@ -9,10 +9,9 @@
 import { ChatBarButton } from "@api/ChatButtons";
 import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
-import { ModalCloseButton, ModalContent, ModalHeader, ModalRoot, ModalSize, openModal } from "@utils/modal";
 import definePlugin, { OptionType, PluginNative } from "@utils/types";
 import { findStoreLazy } from "@webpack";
-import { ChannelStore, FluxDispatcher, GuildStore, React, SelectedChannelStore, SelectedGuildStore } from "@webpack/common";
+import { ChannelStore, FluxDispatcher, GuildStore, React, ReactDOM, SelectedChannelStore, SelectedGuildStore } from "@webpack/common";
 
 // >>> Repositório PÚBLICO do GitHub (usuario/nome) <<<
 const DEFAULT_REPO = "Lukvi/rpg-fundos";
@@ -49,7 +48,7 @@ const settings = definePluginSettings({
     cssExtra: { type: OptionType.STRING, description: "CSS extra (avançado, para ajustes finos)", default: "" },
     local: { type: OptionType.STRING, description: "", default: "{}", hidden: true },
     jogador: { type: OptionType.STRING, description: "", default: "{}", hidden: true },
-    painel: { type: OptionType.COMPONENT, component: () => <PainelSeguro /> }
+    painel: { type: OptionType.COMPONENT, component: () => <BotaoAbrir /> }
 });
 
 // ---------- utilidades ----------
@@ -637,21 +636,25 @@ function BannerAtualizacao() {
 let Protegido: any;
 function obterProtegido() {
     if (!Protegido) {
-        Protegido = class extends (React as any).Component {
-            state: { erro?: string; } = {};
-            static getDerivedStateFromError(e: any) {
-                return { erro: String(e?.stack ?? e?.message ?? e).slice(0, 700) };
-            }
-            render() {
-                if (this.state.erro)
-                    return (
-                        <div style={{ padding: 12, borderRadius: 6, background: "rgba(218,55,60,.2)", whiteSpace: "pre-wrap", fontSize: 12 }}>
-                            O painel encontrou um erro, mas o Discord continua funcionando. Envie esta mensagem para quem fez o plugin:{"\n\n"}{this.state.erro}
-                        </div>
-                    );
-                return (this as any).props.children;
-            }
-        };
+        try {
+            Protegido = class extends (React as any).Component {
+                state: { erro?: string; } = {};
+                static getDerivedStateFromError(e: any) {
+                    return { erro: String(e?.stack ?? e?.message ?? e).slice(0, 700) };
+                }
+                render() {
+                    if (this.state.erro)
+                        return (
+                            <div style={{ padding: 12, borderRadius: 6, background: "rgba(218,55,60,.2)", whiteSpace: "pre-wrap", fontSize: 12 }}>
+                                O painel encontrou um erro, mas o Discord continua funcionando. Envie esta mensagem para quem fez o plugin:{"\n\n"}{this.state.erro}
+                            </div>
+                        );
+                    return (this as any).props.children;
+                }
+            };
+        } catch {
+            Protegido = (p: any) => p.children;
+        }
     }
     return Protegido;
 }
@@ -685,18 +688,74 @@ const Icone = ({ width = 20, height = 20, className }: { width?: number; height?
     </svg>
 );
 
+// O painel roda numa camada própria (fora da árvore do Discord), então um erro nele não derruba o app.
+let camada: { el: HTMLDivElement; root: any; } | undefined;
+
+function fecharPainel() {
+    if (!camada) return;
+    try {
+        if (camada.root?.unmount) camada.root.unmount();
+        else (ReactDOM as any).unmountComponentAtNode?.(camada.el);
+    } catch { }
+    camada.el.remove();
+    camada = undefined;
+}
+
+function JanelaPainel() {
+    React.useEffect(() => {
+        const f = (e: KeyboardEvent) => { if (e.key === "Escape") fecharPainel(); };
+        document.addEventListener("keydown", f);
+        return () => document.removeEventListener("keydown", f);
+    }, []);
+    return (
+        <div style={{
+            width: "min(980px, 92vw)", maxHeight: "88vh", overflowY: "auto", padding: 20, borderRadius: 8,
+            background: "var(--background-primary, #313338)", color: "var(--text-normal, #dbdee1)",
+            boxShadow: "0 8px 32px rgba(0,0,0,.5)", fontFamily: "inherit"
+        }}>
+            <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
+                <h2 style={{ flex: 1, margin: 0 }}>Fundos do RPG</h2>
+                <button style={{ ...estiloBtn, background: "#4e5058" }} onClick={fecharPainel}>Fechar</button>
+            </div>
+            <PainelSeguro />
+        </div>
+    );
+}
+
 function abrirPainel() {
-    openModal(props => (
-        <ModalRoot {...props} size={ModalSize.LARGE}>
-            <ModalHeader>
-                <h2 style={{ margin: 0, flex: 1, color: "var(--header-primary)" }}>Fundos do RPG</h2>
-                <ModalCloseButton onClick={props.onClose} />
-            </ModalHeader>
-            <ModalContent>
-                <div style={{ padding: 16 }}><PainelSeguro /></div>
-            </ModalContent>
-        </ModalRoot>
-    ));
+    if (camada) { fecharPainel(); return; }
+    const el = document.createElement("div");
+    el.id = "rpg-fundos-painel";
+    Object.assign(el.style, {
+        position: "fixed", inset: "0", zIndex: "100000", background: "rgba(0,0,0,.6)",
+        display: "flex", alignItems: "center", justifyContent: "center"
+    });
+    el.addEventListener("mousedown", ev => { if (ev.target === el) fecharPainel(); });
+    document.body.appendChild(el);
+    try {
+        const criar = (ReactDOM as any).createRoot;
+        if (criar) {
+            const root = criar(el);
+            camada = { el, root };
+            root.render(<JanelaPainel />);
+        } else {
+            camada = { el, root: undefined };
+            (ReactDOM as any).render(<JanelaPainel />, el);
+        }
+    } catch (e) {
+        console.error("[RPGFundos] não consegui abrir o painel:", e);
+        el.remove();
+        camada = undefined;
+    }
+}
+
+function BotaoAbrir() {
+    return (
+        <div style={{ color: "var(--text-normal)" }}>
+            <p>O painel de fundos abre numa janela própria. Você também pode abri-lo pelo ícone de imagem ao lado dos botões do chat.</p>
+            <button style={estiloBtn} onClick={abrirPainel}>Abrir painel de fundos</button>
+        </div>
+    );
 }
 
 const BotaoChat = () => (
@@ -755,6 +814,7 @@ export default definePlugin({
         FluxDispatcher.unsubscribe("CHANNEL_SELECT", aoTrocarCanal);
         document.removeEventListener("keydown", atalho);
         if (timer) clearInterval(timer);
+        fecharPainel();
         limpar();
         styleEl?.remove();
         imgStyleEl?.remove();
