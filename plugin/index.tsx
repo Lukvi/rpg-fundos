@@ -1,17 +1,15 @@
 /*
- * RPGFundos v6
+ * RPGFundos v4
  * MESTRE: escolhe a imagem de cada canal no painel; ela é enviada e publicada automaticamente.
  * Ajustes por canal (mestre): escurecimento, desfoque, zoom, posição e degradê.
  * Ajustes pessoais (cada jogador): opacidade, desfoque extra, degradê, canais ocultos, atalho Ctrl+Alt+B.
  * JOGADORES: só instalam; os fundos chegam sozinhos.
  */
 
-import { ChatBarButton } from "@api/ChatButtons";
-import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
 import definePlugin, { OptionType, PluginNative } from "@utils/types";
 import { findStoreLazy } from "@webpack";
-import { ChannelStore, FluxDispatcher, GuildStore, React, ReactDOM, SelectedChannelStore, SelectedGuildStore } from "@webpack/common";
+import { ChannelStore, FluxDispatcher, GuildStore, React, SelectedChannelStore, SelectedGuildStore } from "@webpack/common";
 
 // >>> Repositório PÚBLICO do GitHub (usuario/nome) <<<
 const DEFAULT_REPO = "Lukvi/rpg-fundos";
@@ -22,7 +20,7 @@ const DEFAULT_SELECTOR = '[class^="chat_"], [class*=" chat_"]';
 const Native = VencordNative.pluginHelpers.RPGFundos as PluginNative<typeof import("./native")>;
 const GuildChannelStore = findStoreLazy("GuildChannelStore");
 
-type Entry = { url: string; dim: number; blur: number; zoom: number; x: number; y: number; fade: number; inicio: number; guild?: string; canal?: string; };
+type Entry = { url: string; dim: number; blur: number; zoom: number; x: number; y: number; fade: number; inicio: number; };
 type Mapa = Record<string, Entry>;
 
 const DEF = { dim: 0.6, blur: 0, zoom: 1, x: 50, y: 50, fade: 100, inicio: 30 };
@@ -38,17 +36,12 @@ const settings = definePluginSettings({
         description: "SÓ PARA O MESTRE: token do GitHub (Contents: Read and write, só neste repositório). Jogadores deixam vazio.",
         default: ""
     },
-    autoAtualizar: {
-        type: OptionType.BOOLEAN,
-        description: "Atualizar o plugin sozinho ao abrir o Discord (desligado = só avisa)",
-        default: false
-    },
     intervalo: { type: OptionType.NUMBER, description: "Verificar atualizações a cada quantos segundos", default: 60 },
     seletor: { type: OptionType.STRING, description: "Seletor CSS do contêiner do chat (avançado)", default: DEFAULT_SELECTOR },
     cssExtra: { type: OptionType.STRING, description: "CSS extra (avançado, para ajustes finos)", default: "" },
     local: { type: OptionType.STRING, description: "", default: "{}", hidden: true },
     jogador: { type: OptionType.STRING, description: "", default: "{}", hidden: true },
-    painel: { type: OptionType.COMPONENT, component: () => <BotaoAbrir /> }
+    painel: { type: OptionType.COMPONENT, component: () => <Painel /> }
 });
 
 // ---------- utilidades ----------
@@ -66,9 +59,7 @@ function normalizar(raw: any): Mapa {
                 url: v.url,
                 dim: num(v.dim, DEF.dim), blur: num(v.blur, DEF.blur),
                 zoom: num(v.zoom, DEF.zoom), x: num(v.x, DEF.x), y: num(v.y, DEF.y),
-                fade: num(v.fade, DEF.fade), inicio: num(v.inicio, DEF.inicio),
-                guild: typeof v.guild === "string" ? v.guild : undefined,
-                canal: typeof v.canal === "string" ? v.canal : undefined
+                fade: num(v.fade, DEF.fade), inicio: num(v.inicio, DEF.inicio)
             };
     }
     return out;
@@ -92,10 +83,7 @@ function gravarJogador(patch: Partial<Jogador>) {
 
 const rawBase = () => `https://raw.githubusercontent.com/${settings.store.repo}/${settings.store.branch}`;
 
-const remotoPorServidor: Record<string, Mapa> = {};
-const ultimoFetch = new Map<string, number>();
-const mapaRemoto = (): Mapa => Object.assign({}, ...Object.values(remotoPorServidor));
-const mapaTotal = (): Mapa => ({ ...mapaRemoto(), ...lerLocal() });
+let remoto: Mapa = {};
 let timer: ReturnType<typeof setInterval> | undefined;
 let styleEl: HTMLStyleElement | undefined;
 let imgStyleEl: HTMLStyleElement | undefined; // guarda só a imagem, para não reprocessar um GIF grande a cada ajuste
@@ -123,35 +111,19 @@ async function carregarImagem(url: string) {
 
 function precarregar() {
     const g = SelectedGuildStore.getGuildId();
-    for (const [id, e] of Object.entriesmapaTotal())
+    for (const [id, e] of Object.entries({ ...remoto, ...lerLocal() }))
         if (ChannelStore.getChannel(id)?.guild_id === g) carregarImagem(e.url);
 }
 
-async function baixarServidor(guildId: string, forcar = false) {
-    if (!guildId) return;
-    if (!forcar && Date.now() - (ultimoFetch.get(guildId) ?? 0) < 20000) return;
-    ultimoFetch.set(guildId, Date.now());
-    const t = Date.now();
-    try {
-        const txt = await Native.buscarTexto(`${rawBase()}/servidores/${guildId}/fundos.json?t=${t}`);
-        remotoPorServidor[guildId] = normalizar(JSON.parse(txt));
-    } catch {
-        try { // compatibilidade com o formato antigo (um fundos.json só)
-            const txt = await Native.buscarTexto(`${rawBase()}/fundos.json?t=${t}`);
-            const meus: Mapa = {};
-            for (const [id, e] of Object.entries(normalizar(JSON.parse(txt))))
-                if (ChannelStore.getChannel(id)?.guild_id === guildId) meus[id] = e;
-            remotoPorServidor[guildId] = meus;
-        } catch (e) {
-            console.warn("[RPGFundos] não consegui baixar os fundos do servidor:", e);
-        }
-    }
-    aplicar();
-    precarregar();
-}
-
 async function baixarRemoto() {
-    await baixarServidor(SelectedGuildStore.getGuildId() ?? "", true);
+    try {
+        const txt = await Native.buscarTexto(`${rawBase()}/fundos.json?t=${Date.now()}`);
+        remoto = normalizar(JSON.parse(txt));
+        aplicar();
+        precarregar();
+    } catch (e) {
+        console.warn("[RPGFundos] não consegui baixar o fundos.json:", e);
+    }
 }
 
 function atalho(ev: KeyboardEvent) {
@@ -162,7 +134,6 @@ function atalho(ev: KeyboardEvent) {
 }
 
 function aoTrocarCanal() {
-    baixarServidor(SelectedGuildStore.getGuildId() ?? "");
     aplicar();
     precarregar();
 }
@@ -238,7 +209,7 @@ function aplicar() {
     if (!styleEl || !imgStyleEl) return;
     const id = SelectedChannelStore.getChannelId();
     const J = lerJogador();
-    const e = id ? mapaTotal()[id] : undefined;
+    const e = id ? ({ ...remoto, ...lerLocal() })[id] : undefined;
     if (!e || !J.ativo || J.ocultos.includes(id)) { esconder(J); return; }
 
     let src = imgCache.get(e.url);
@@ -338,19 +309,12 @@ async function lerArquivo(file: File): Promise<{ dataUrl: string; base64: string
     return { ...(await reduzir(file)), ext: "jpg" };
 }
 
-async function publicarTudo(mapa: Mapa, guildAtual: string, extras: { caminho: string; base64: string; }[] = []) {
+async function publicarTudo(mapa: Mapa, extras: { caminho: string; base64: string; }[] = []) {
     const { token, repo, branch } = settings.store;
-    const porServidor: Record<string, Mapa> = {};
-    if (guildAtual) porServidor[guildAtual] = {};
-    for (const [id, e] of Object.entries(mapa)) {
-        const g = e.guild ?? ChannelStore.getChannel(id)?.guild_id;
-        if (!g) continue;
-        (porServidor[g] ??= {})[id] = { ...e, guild: g };
-    }
-    const arquivos: { caminho: string; base64?: string; texto?: string; }[] = [...extras];
-    for (const [g, m] of Object.entries(porServidor))
-        arquivos.push({ caminho: `servidores/${g}/fundos.json`, texto: JSON.stringify(m, null, 2) });
-    await Native.publicar({ token, repo, branch, arquivos });
+    await Native.publicar({
+        token, repo, branch,
+        arquivos: [...extras, { caminho: "fundos.json", texto: JSON.stringify(mapa, null, 2) }]
+    });
 }
 
 // ---------- painel do mestre ----------
@@ -394,17 +358,17 @@ function PainelMestre() {
         aplicar();
     }
 
-    async function escolher(canalId: string, file?: File, nomeCanal?: string) {
+    async function escolher(canalId: string, file?: File) {
         if (!file) return;
         try {
             setStatus("Enviando imagem...");
             const { dataUrl, base64, ext } = await lerArquivo(file);
-            const caminho = `servidores/${guildId}/canais/${canalId}/${Date.now()}.${ext}`;
+            const caminho = `fundos/${canalId}-${Date.now()}.${ext}`;
             const url = `${rawBase()}/${caminho}`;
             imgCache.set(url, dataUrl);
-            const novo: Mapa = { ...dados, [canalId]: { ...DEF, ...dados[canalId], url, guild: guildId, canal: nomeCanal } };
+            const novo: Mapa = { ...dados, [canalId]: { ...DEF, ...dados[canalId], url } };
             gravarLocal(novo);
-            await publicarTudo(novo, guildId, [{ caminho, base64 }]);
+            await publicarTudo(novo, [{ caminho, base64 }]);
             setSujo(false);
             setStatus("Publicado! Os jogadores recebem em alguns minutos.");
         } catch (e: any) {
@@ -438,7 +402,7 @@ function PainelMestre() {
     async function publicarAlteracoes() {
         try {
             setStatus("Publicando...");
-            await publicarTudo(dados, guildId);
+            await publicarTudo(dados);
             setSujo(false);
             setStatus("Publicado!");
         } catch (e: any) {
@@ -475,7 +439,7 @@ function PainelMestre() {
                             <label style={estiloBtn}>
                                 {e ? "Trocar imagem" : "Escolher imagem"}
                                 <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: "none" }}
-                                    onChange={ev => { escolher(c.id, ev.target.files?.[0], c.name); ev.target.value = ""; }} />
+                                    onChange={ev => { escolher(c.id, ev.target.files?.[0]); ev.target.value = ""; }} />
                             </label>
                             {e && prev ? (
                                 <div style={{ width: 160, height: 90, overflow: "hidden", borderRadius: 4, position: "relative", background: "#313338" }}>
@@ -524,7 +488,7 @@ function PainelJogador() {
     void jogador;
     void local;
 
-    const comFundo = Object.keysmapaTotal();
+    const comFundo = Object.keys({ ...remoto, ...lerLocal() });
 
     function alternarCanal(id: string, mostrar: boolean) {
         const set = new Set(J.ocultos);
@@ -595,81 +559,11 @@ function PainelJogador() {
     );
 }
 
-function BannerAtualizacao() {
-    const [estado, setEstado] = React.useState<"verificando" | "atual" | "antigo" | "disponivel" | "atualizando" | "pronto" | "erro">("verificando");
-    const [msg, setMsg] = React.useState("");
-    const args = () => ({ repo: settings.store.repo, branch: settings.store.branch });
-
-    React.useEffect(() => {
-        if (typeof (Native as any)?.verificarAtualizacao !== "function") { setEstado("antigo"); return; }
-        Promise.resolve()
-            .then(() => Native.verificarAtualizacao(args()))
-            .then(r => setEstado(r.disponivel ? "disponivel" : "atual"))
-            .catch(() => setEstado("atual"));
-    }, []);
-
-    async function atualizarAgora() {
-        setEstado("atualizando");
-        try {
-            await Native.atualizar(args());
-            setEstado("pronto");
-        } catch (e: any) {
-            setMsg(String(e?.message ?? e));
-            setEstado("erro");
-        }
-    }
-
-    const caixa: React.CSSProperties = { padding: 12, borderRadius: 6, margin: "8px 0", background: "rgba(88,101,242,.15)" };
-    if (estado === "antigo")
-        return <div style={caixa}>O atualizador ainda não está ativo neste computador. Feche o Discord por completo (inclusive pelo ícone perto do relógio) e abra de novo.</div>;
-    if (estado === "disponivel")
-        return <div style={caixa}>Há uma atualização do plugin. <button style={{ ...estiloBtn, marginLeft: 8 }} onClick={atualizarAgora}>Atualizar agora</button></div>;
-    if (estado === "atualizando")
-        return <div style={caixa}>Atualizando... pode levar um ou dois minutos. Não feche o Discord.</div>;
-    if (estado === "pronto")
-        return <div style={caixa}>Atualizado! Aperte <b>Ctrl+R</b>. Se algo parecer errado, feche o Discord por completo (inclusive pelo ícone perto do relógio) e abra de novo.</div>;
-    if (estado === "erro")
-        return <div style={{ ...caixa, background: "rgba(218,55,60,.2)" }}>Não consegui atualizar: {msg}<br />Seus arquivos antigos foram mantidos. Se persistir, rode o Instalar-RPG.bat.</div>;
-    return null;
-}
-
-let Protegido: any;
-function obterProtegido() {
-    if (!Protegido) {
-        try {
-            Protegido = class extends (React as any).Component {
-                state: { erro?: string; } = {};
-                static getDerivedStateFromError(e: any) {
-                    return { erro: String(e?.stack ?? e?.message ?? e).slice(0, 700) };
-                }
-                render() {
-                    if (this.state.erro)
-                        return (
-                            <div style={{ padding: 12, borderRadius: 6, background: "rgba(218,55,60,.2)", whiteSpace: "pre-wrap", fontSize: 12 }}>
-                                O painel encontrou um erro, mas o Discord continua funcionando. Envie esta mensagem para quem fez o plugin:{"\n\n"}{this.state.erro}
-                            </div>
-                        );
-                    return (this as any).props.children;
-                }
-            };
-        } catch {
-            Protegido = (p: any) => p.children;
-        }
-    }
-    return Protegido;
-}
-
-function PainelSeguro() {
-    const P = obterProtegido();
-    return <P><Painel /></P>;
-}
-
 function Painel() {
     settings.use(["token"]);
     const mestre = !!settings.store.token;
     return (
         <div style={{ color: "var(--text-normal)" }}>
-            <BannerAtualizacao />
             {mestre
                 ? <PainelMestre />
                 : <p style={{ color: "#faa61a" }}>
@@ -680,111 +574,6 @@ function Painel() {
     );
 }
 
-// ---------- acesso rápido ----------
-
-const Icone = ({ width = 20, height = 20, className }: { width?: number; height?: number; className?: string; }) => (
-    <svg width={width} height={height} viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden="true">
-        <path fillRule="evenodd" d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm0 2v10l4-4 3 3 4-5 4 5V5H5Zm4.5 1.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z" />
-    </svg>
-);
-
-// O painel roda numa camada própria (fora da árvore do Discord), então um erro nele não derruba o app.
-let camada: { el: HTMLDivElement; root: any; } | undefined;
-
-function fecharPainel() {
-    if (!camada) return;
-    try {
-        if (camada.root?.unmount) camada.root.unmount();
-        else (ReactDOM as any).unmountComponentAtNode?.(camada.el);
-    } catch { }
-    camada.el.remove();
-    camada = undefined;
-}
-
-function JanelaPainel() {
-    React.useEffect(() => {
-        const f = (e: KeyboardEvent) => { if (e.key === "Escape") fecharPainel(); };
-        document.addEventListener("keydown", f);
-        return () => document.removeEventListener("keydown", f);
-    }, []);
-    return (
-        <div style={{
-            width: "min(980px, 92vw)", maxHeight: "88vh", overflowY: "auto", padding: 20, borderRadius: 8,
-            background: "var(--background-primary, #313338)", color: "var(--text-normal, #dbdee1)",
-            boxShadow: "0 8px 32px rgba(0,0,0,.5)", fontFamily: "inherit"
-        }}>
-            <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
-                <h2 style={{ flex: 1, margin: 0 }}>Fundos do RPG</h2>
-                <button style={{ ...estiloBtn, background: "#4e5058" }} onClick={fecharPainel}>Fechar</button>
-            </div>
-            <PainelSeguro />
-        </div>
-    );
-}
-
-function abrirPainel() {
-    if (camada) { fecharPainel(); return; }
-    const el = document.createElement("div");
-    el.id = "rpg-fundos-painel";
-    Object.assign(el.style, {
-        position: "fixed", inset: "0", zIndex: "100000", background: "rgba(0,0,0,.6)",
-        display: "flex", alignItems: "center", justifyContent: "center"
-    });
-    el.addEventListener("mousedown", ev => { if (ev.target === el) fecharPainel(); });
-    document.body.appendChild(el);
-    try {
-        const criar = (ReactDOM as any).createRoot;
-        if (criar) {
-            const root = criar(el);
-            camada = { el, root };
-            root.render(<JanelaPainel />);
-        } else {
-            camada = { el, root: undefined };
-            (ReactDOM as any).render(<JanelaPainel />, el);
-        }
-    } catch (e) {
-        console.error("[RPGFundos] não consegui abrir o painel:", e);
-        el.remove();
-        camada = undefined;
-    }
-}
-
-function BotaoAbrir() {
-    return (
-        <div style={{ color: "var(--text-normal)" }}>
-            <p>O painel de fundos abre numa janela própria. Você também pode abri-lo pelo ícone de imagem ao lado dos botões do chat.</p>
-            <button style={estiloBtn} onClick={abrirPainel}>Abrir painel de fundos</button>
-        </div>
-    );
-}
-
-const BotaoChat = () => (
-    <ChatBarButton tooltip="Fundos do RPG" onClick={abrirPainel}>
-        <Icone />
-    </ChatBarButton>
-);
-
-async function checarAtualizacao() {
-    try {
-        const args = { repo: settings.store.repo, branch: settings.store.branch };
-        const r = await Native.verificarAtualizacao(args);
-        if (!r.disponivel) return;
-        if (settings.store.autoAtualizar) {
-            await Native.atualizar(args);
-            showNotification({ title: "RPG Fundos atualizado", body: "Aperte Ctrl+R para carregar a nova versão.", noPersist: true });
-        } else {
-            showNotification({
-                title: "RPG Fundos: atualização disponível",
-                body: "Clique aqui para atualizar.",
-                permanent: true, noPersist: true,
-                onClick: abrirPainel
-            });
-        }
-    } catch (e) {
-        console.warn("[RPGFundos] verificação de atualização falhou:", e);
-    }
-}
-
 // ---------- plugin ----------
 
 export default definePlugin({
@@ -792,8 +581,6 @@ export default definePlugin({
     description: "Fundo de imagem diferente em cada canal, sincronizado com o mestre do RPG.",
     authors: [{ name: "Mestre", id: 0n }],
     settings,
-
-    chatBarButton: { icon: Icone, render: BotaoChat },
 
     start() {
         styleEl = document.createElement("style");
@@ -807,14 +594,12 @@ export default definePlugin({
         baixarRemoto();
         timer = setInterval(baixarRemoto, Math.max(15, settings.store.intervalo || 60) * 1000);
         aplicar();
-        setTimeout(checarAtualizacao, 8000);
     },
 
     stop() {
         FluxDispatcher.unsubscribe("CHANNEL_SELECT", aoTrocarCanal);
         document.removeEventListener("keydown", atalho);
         if (timer) clearInterval(timer);
-        fecharPainel();
         limpar();
         styleEl?.remove();
         imgStyleEl?.remove();
