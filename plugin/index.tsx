@@ -1,12 +1,15 @@
 /*
- * RPGFundos v4
+ * RPGFundos v6
  * MESTRE: escolhe a imagem de cada canal no painel; ela é enviada e publicada automaticamente.
  * Ajustes por canal (mestre): escurecimento, desfoque, zoom, posição e degradê.
  * Ajustes pessoais (cada jogador): opacidade, desfoque extra, degradê, canais ocultos, atalho Ctrl+Alt+B.
  * JOGADORES: só instalam; os fundos chegam sozinhos.
  */
 
+import { ChatBarButton } from "@api/ChatButtons";
+import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
+import { ModalCloseButton, ModalContent, ModalHeader, ModalRoot, ModalSize, openModal } from "@utils/modal";
 import definePlugin, { OptionType, PluginNative } from "@utils/types";
 import { findStoreLazy } from "@webpack";
 import { ChannelStore, FluxDispatcher, GuildStore, React, SelectedChannelStore, SelectedGuildStore } from "@webpack/common";
@@ -20,7 +23,7 @@ const DEFAULT_SELECTOR = '[class^="chat_"], [class*=" chat_"]';
 const Native = VencordNative.pluginHelpers.RPGFundos as PluginNative<typeof import("./native")>;
 const GuildChannelStore = findStoreLazy("GuildChannelStore");
 
-type Entry = { url: string; dim: number; blur: number; zoom: number; x: number; y: number; fade: number; inicio: number; };
+type Entry = { url: string; dim: number; blur: number; zoom: number; x: number; y: number; fade: number; inicio: number; guild?: string; canal?: string; };
 type Mapa = Record<string, Entry>;
 
 const DEF = { dim: 0.6, blur: 0, zoom: 1, x: 50, y: 50, fade: 100, inicio: 30 };
@@ -35,6 +38,11 @@ const settings = definePluginSettings({
         type: OptionType.STRING,
         description: "SÓ PARA O MESTRE: token do GitHub (Contents: Read and write, só neste repositório). Jogadores deixam vazio.",
         default: ""
+    },
+    autoAtualizar: {
+        type: OptionType.BOOLEAN,
+        description: "Atualizar o plugin sozinho ao abrir o Discord (desligado = só avisa)",
+        default: false
     },
     intervalo: { type: OptionType.NUMBER, description: "Verificar atualizações a cada quantos segundos", default: 60 },
     seletor: { type: OptionType.STRING, description: "Seletor CSS do contêiner do chat (avançado)", default: DEFAULT_SELECTOR },
@@ -59,7 +67,9 @@ function normalizar(raw: any): Mapa {
                 url: v.url,
                 dim: num(v.dim, DEF.dim), blur: num(v.blur, DEF.blur),
                 zoom: num(v.zoom, DEF.zoom), x: num(v.x, DEF.x), y: num(v.y, DEF.y),
-                fade: num(v.fade, DEF.fade), inicio: num(v.inicio, DEF.inicio)
+                fade: num(v.fade, DEF.fade), inicio: num(v.inicio, DEF.inicio),
+                guild: typeof v.guild === "string" ? v.guild : undefined,
+                canal: typeof v.canal === "string" ? v.canal : undefined
             };
     }
     return out;
@@ -83,7 +93,10 @@ function gravarJogador(patch: Partial<Jogador>) {
 
 const rawBase = () => `https://raw.githubusercontent.com/${settings.store.repo}/${settings.store.branch}`;
 
-let remoto: Mapa = {};
+const remotoPorServidor: Record<string, Mapa> = {};
+const ultimoFetch = new Map<string, number>();
+const mapaRemoto = (): Mapa => Object.assign({}, ...Object.values(remotoPorServidor));
+const mapaTotal = (): Mapa => ({ ...mapaRemoto(), ...lerLocal() });
 let timer: ReturnType<typeof setInterval> | undefined;
 let styleEl: HTMLStyleElement | undefined;
 let imgStyleEl: HTMLStyleElement | undefined; // guarda só a imagem, para não reprocessar um GIF grande a cada ajuste
@@ -111,19 +124,35 @@ async function carregarImagem(url: string) {
 
 function precarregar() {
     const g = SelectedGuildStore.getGuildId();
-    for (const [id, e] of Object.entries({ ...remoto, ...lerLocal() }))
+    for (const [id, e] of Object.entriesmapaTotal())
         if (ChannelStore.getChannel(id)?.guild_id === g) carregarImagem(e.url);
 }
 
-async function baixarRemoto() {
+async function baixarServidor(guildId: string, forcar = false) {
+    if (!guildId) return;
+    if (!forcar && Date.now() - (ultimoFetch.get(guildId) ?? 0) < 20000) return;
+    ultimoFetch.set(guildId, Date.now());
+    const t = Date.now();
     try {
-        const txt = await Native.buscarTexto(`${rawBase()}/fundos.json?t=${Date.now()}`);
-        remoto = normalizar(JSON.parse(txt));
-        aplicar();
-        precarregar();
-    } catch (e) {
-        console.warn("[RPGFundos] não consegui baixar o fundos.json:", e);
+        const txt = await Native.buscarTexto(`${rawBase()}/servidores/${guildId}/fundos.json?t=${t}`);
+        remotoPorServidor[guildId] = normalizar(JSON.parse(txt));
+    } catch {
+        try { // compatibilidade com o formato antigo (um fundos.json só)
+            const txt = await Native.buscarTexto(`${rawBase()}/fundos.json?t=${t}`);
+            const meus: Mapa = {};
+            for (const [id, e] of Object.entries(normalizar(JSON.parse(txt))))
+                if (ChannelStore.getChannel(id)?.guild_id === guildId) meus[id] = e;
+            remotoPorServidor[guildId] = meus;
+        } catch (e) {
+            console.warn("[RPGFundos] não consegui baixar os fundos do servidor:", e);
+        }
     }
+    aplicar();
+    precarregar();
+}
+
+async function baixarRemoto() {
+    await baixarServidor(SelectedGuildStore.getGuildId() ?? "", true);
 }
 
 function atalho(ev: KeyboardEvent) {
@@ -134,6 +163,7 @@ function atalho(ev: KeyboardEvent) {
 }
 
 function aoTrocarCanal() {
+    baixarServidor(SelectedGuildStore.getGuildId() ?? "");
     aplicar();
     precarregar();
 }
@@ -209,7 +239,7 @@ function aplicar() {
     if (!styleEl || !imgStyleEl) return;
     const id = SelectedChannelStore.getChannelId();
     const J = lerJogador();
-    const e = id ? ({ ...remoto, ...lerLocal() })[id] : undefined;
+    const e = id ? mapaTotal()[id] : undefined;
     if (!e || !J.ativo || J.ocultos.includes(id)) { esconder(J); return; }
 
     let src = imgCache.get(e.url);
@@ -309,12 +339,19 @@ async function lerArquivo(file: File): Promise<{ dataUrl: string; base64: string
     return { ...(await reduzir(file)), ext: "jpg" };
 }
 
-async function publicarTudo(mapa: Mapa, extras: { caminho: string; base64: string; }[] = []) {
+async function publicarTudo(mapa: Mapa, guildAtual: string, extras: { caminho: string; base64: string; }[] = []) {
     const { token, repo, branch } = settings.store;
-    await Native.publicar({
-        token, repo, branch,
-        arquivos: [...extras, { caminho: "fundos.json", texto: JSON.stringify(mapa, null, 2) }]
-    });
+    const porServidor: Record<string, Mapa> = {};
+    if (guildAtual) porServidor[guildAtual] = {};
+    for (const [id, e] of Object.entries(mapa)) {
+        const g = e.guild ?? ChannelStore.getChannel(id)?.guild_id;
+        if (!g) continue;
+        (porServidor[g] ??= {})[id] = { ...e, guild: g };
+    }
+    const arquivos: { caminho: string; base64?: string; texto?: string; }[] = [...extras];
+    for (const [g, m] of Object.entries(porServidor))
+        arquivos.push({ caminho: `servidores/${g}/fundos.json`, texto: JSON.stringify(m, null, 2) });
+    await Native.publicar({ token, repo, branch, arquivos });
 }
 
 // ---------- painel do mestre ----------
@@ -358,17 +395,17 @@ function PainelMestre() {
         aplicar();
     }
 
-    async function escolher(canalId: string, file?: File) {
+    async function escolher(canalId: string, file?: File, nomeCanal?: string) {
         if (!file) return;
         try {
             setStatus("Enviando imagem...");
             const { dataUrl, base64, ext } = await lerArquivo(file);
-            const caminho = `fundos/${canalId}-${Date.now()}.${ext}`;
+            const caminho = `servidores/${guildId}/canais/${canalId}/${Date.now()}.${ext}`;
             const url = `${rawBase()}/${caminho}`;
             imgCache.set(url, dataUrl);
-            const novo: Mapa = { ...dados, [canalId]: { ...DEF, ...dados[canalId], url } };
+            const novo: Mapa = { ...dados, [canalId]: { ...DEF, ...dados[canalId], url, guild: guildId, canal: nomeCanal } };
             gravarLocal(novo);
-            await publicarTudo(novo, [{ caminho, base64 }]);
+            await publicarTudo(novo, guildId, [{ caminho, base64 }]);
             setSujo(false);
             setStatus("Publicado! Os jogadores recebem em alguns minutos.");
         } catch (e: any) {
@@ -402,7 +439,7 @@ function PainelMestre() {
     async function publicarAlteracoes() {
         try {
             setStatus("Publicando...");
-            await publicarTudo(dados);
+            await publicarTudo(dados, guildId);
             setSujo(false);
             setStatus("Publicado!");
         } catch (e: any) {
@@ -439,7 +476,7 @@ function PainelMestre() {
                             <label style={estiloBtn}>
                                 {e ? "Trocar imagem" : "Escolher imagem"}
                                 <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: "none" }}
-                                    onChange={ev => { escolher(c.id, ev.target.files?.[0]); ev.target.value = ""; }} />
+                                    onChange={ev => { escolher(c.id, ev.target.files?.[0], c.name); ev.target.value = ""; }} />
                             </label>
                             {e && prev ? (
                                 <div style={{ width: 160, height: 90, overflow: "hidden", borderRadius: 4, position: "relative", background: "#313338" }}>
@@ -488,7 +525,7 @@ function PainelJogador() {
     void jogador;
     void local;
 
-    const comFundo = Object.keys({ ...remoto, ...lerLocal() });
+    const comFundo = Object.keysmapaTotal();
 
     function alternarCanal(id: string, mostrar: boolean) {
         const set = new Set(J.ocultos);
@@ -559,11 +596,46 @@ function PainelJogador() {
     );
 }
 
+function BannerAtualizacao() {
+    const [estado, setEstado] = React.useState<"verificando" | "atual" | "disponivel" | "atualizando" | "pronto" | "erro">("verificando");
+    const [msg, setMsg] = React.useState("");
+    const args = () => ({ repo: settings.store.repo, branch: settings.store.branch });
+
+    React.useEffect(() => {
+        Native.verificarAtualizacao(args())
+            .then(r => setEstado(r.disponivel ? "disponivel" : "atual"))
+            .catch(() => setEstado("atual"));
+    }, []);
+
+    async function atualizarAgora() {
+        setEstado("atualizando");
+        try {
+            await Native.atualizar(args());
+            setEstado("pronto");
+        } catch (e: any) {
+            setMsg(String(e?.message ?? e));
+            setEstado("erro");
+        }
+    }
+
+    const caixa: React.CSSProperties = { padding: 12, borderRadius: 6, margin: "8px 0", background: "rgba(88,101,242,.15)" };
+    if (estado === "disponivel")
+        return <div style={caixa}>Há uma atualização do plugin. <button style={{ ...estiloBtn, marginLeft: 8 }} onClick={atualizarAgora}>Atualizar agora</button></div>;
+    if (estado === "atualizando")
+        return <div style={caixa}>Atualizando... pode levar um ou dois minutos. Não feche o Discord.</div>;
+    if (estado === "pronto")
+        return <div style={caixa}>Atualizado! Aperte <b>Ctrl+R</b>. Se algo parecer errado, feche o Discord por completo (inclusive pelo ícone perto do relógio) e abra de novo.</div>;
+    if (estado === "erro")
+        return <div style={{ ...caixa, background: "rgba(218,55,60,.2)" }}>Não consegui atualizar: {msg}<br />Seus arquivos antigos foram mantidos. Se persistir, rode o Instalar-RPG.bat.</div>;
+    return null;
+}
+
 function Painel() {
     settings.use(["token"]);
     const mestre = !!settings.store.token;
     return (
         <div style={{ color: "var(--text-normal)" }}>
+            <BannerAtualizacao />
             {mestre
                 ? <PainelMestre />
                 : <p style={{ color: "#faa61a" }}>
@@ -574,6 +646,55 @@ function Painel() {
     );
 }
 
+// ---------- acesso rápido ----------
+
+const Icone = ({ width = 20, height = 20, className }: { width?: number; height?: number; className?: string; }) => (
+    <svg width={width} height={height} viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden="true">
+        <path fillRule="evenodd" d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm0 2v10l4-4 3 3 4-5 4 5V5H5Zm4.5 1.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z" />
+    </svg>
+);
+
+function abrirPainel() {
+    openModal(props => (
+        <ModalRoot {...props} size={ModalSize.LARGE}>
+            <ModalHeader>
+                <h2 style={{ margin: 0, flex: 1, color: "var(--header-primary)" }}>Fundos do RPG</h2>
+                <ModalCloseButton onClick={props.onClose} />
+            </ModalHeader>
+            <ModalContent>
+                <div style={{ padding: 16 }}><Painel /></div>
+            </ModalContent>
+        </ModalRoot>
+    ));
+}
+
+const BotaoChat = () => (
+    <ChatBarButton tooltip="Fundos do RPG" onClick={abrirPainel}>
+        <Icone />
+    </ChatBarButton>
+);
+
+async function checarAtualizacao() {
+    try {
+        const args = { repo: settings.store.repo, branch: settings.store.branch };
+        const r = await Native.verificarAtualizacao(args);
+        if (!r.disponivel) return;
+        if (settings.store.autoAtualizar) {
+            await Native.atualizar(args);
+            showNotification({ title: "RPG Fundos atualizado", body: "Aperte Ctrl+R para carregar a nova versão.", noPersist: true });
+        } else {
+            showNotification({
+                title: "RPG Fundos: atualização disponível",
+                body: "Clique aqui para atualizar.",
+                permanent: true, noPersist: true,
+                onClick: abrirPainel
+            });
+        }
+    } catch (e) {
+        console.warn("[RPGFundos] verificação de atualização falhou:", e);
+    }
+}
+
 // ---------- plugin ----------
 
 export default definePlugin({
@@ -581,6 +702,8 @@ export default definePlugin({
     description: "Fundo de imagem diferente em cada canal, sincronizado com o mestre do RPG.",
     authors: [{ name: "Mestre", id: 0n }],
     settings,
+
+    chatBarButton: { icon: Icone, render: BotaoChat },
 
     start() {
         styleEl = document.createElement("style");
@@ -594,6 +717,7 @@ export default definePlugin({
         baixarRemoto();
         timer = setInterval(baixarRemoto, Math.max(15, settings.store.intervalo || 60) * 1000);
         aplicar();
+        setTimeout(checarAtualizacao, 8000);
     },
 
     stop() {
