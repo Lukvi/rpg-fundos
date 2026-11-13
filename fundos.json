@@ -1,22 +1,32 @@
 {
   "1220826115787063378": {
     "url": "https://raw.githubusercontent.com/Lukvi/rpg-fundos/main/fundos/1220826115787063378-1794603607304.jpg",
-    "dim": 0.25,
+    "dim": 0,
     "blur": 0,
     "zoom": 1,
     "x": 50,
     "y": 50,
-    "fade": 100,
+    "fade": 70,
     "inicio": 30
   },
   "1220864162322972743": {
-    "dim": 0.25,
+    "url": "https://raw.githubusercontent.com/Lukvi/rpg-fundos/main/fundos/1220864162322972743-1794604355378.jpg",
+    "dim": 0,
+    "blur": 0,
+    "zoom": 1,
+    "x": 50,
+    "y": 50,
+    "fade": 70,
+    "inicio": 30
+  },
+  "1220864781142200390": {
+    "dim": 0.6,
     "blur": 0,
     "zoom": 1,
     "x": 50,
     "y": 50,
     "fade": 100,
     "inicio": 30,
-    "url": "https://raw.githubusercontent.com/Lukvi/rpg-fundos/main/fundos/1220864162322972743-1794604355378.jpg"
+    "url": "https://raw.githubusercontent.com/Lukvi/rpg-fundos/main/fundos/1220864781142200390-1794607422054.jpg"
   }
 }
