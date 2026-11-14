@@ -579,6 +579,7 @@ function Painel() {
 export default definePlugin({
     name: "RPGFundos",
     description: "Fundo de imagem diferente em cada canal, sincronizado com o mestre do RPG.",
+    enabledByDefault: true, // jogadores novos já recebem o plugin ligado
     authors: [{ name: "Mestre", id: 0n }],
     settings,
 
